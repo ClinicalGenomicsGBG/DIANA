@@ -1832,7 +1832,8 @@ workflow annotation {
             // Standalone svannasv annotation mode skips this — MGMT processes never ran.
             def mgmt_section_ran = params.run_mode in ['mgmt', 'rmd', 'all'] || params.run_mode_order || params.run_mode_epiannotation
             if ((params.run_mode_order || params.run_mode_epiannotation || params.run_mode_annotation) && mgmt_section_ran) {
-                def sturgeon_pdf_ch = sturgeon_available
+                def sturgeon_pdf_ch
+                sturgeon_pdf_ch = sturgeon_available
                     ? sturgeon.out.sturgeon_pdf
                     : extract_epic.out.mnpflex_bed.map { sid, f -> tuple(sid, file("NO_STURGEON_PDF")) }
                 copy_results_to_summary(
@@ -1853,11 +1854,13 @@ workflow annotation {
         if (params.run_mode in ['roi', 'rmd', 'all'] || params.run_mode_order) {
             println "Running ROI Analysis (annotation of pre-existing VCFs from epi2me)..."
 
+            def roi_input_data = input_data
+
             // Step 1: Create channels for VCF files
             // In epiannotation/order mode, derive from input_data to ensure dependency on epi2me completion
             // In standalone mode, create from sample list
             def clair3_annot_input = (params.run_mode_epiannotation || params.run_mode_order) ?
-                input_data.map { args ->
+                roi_input_data.map { args ->
                     def sample_id = args[0]
                     def clair3_output_dir = file("${params.output_path}/routine_epi2me/${sample_id}/output_clair3")
                     def pileup_vcf = file("${params.output_path}/routine_epi2me/${sample_id}/output_clair3/pileup.vcf.gz")
@@ -1879,7 +1882,7 @@ workflow annotation {
                     .view { "Clair3 annotation input: $it" }
 
             def clairsto_annot_input = (params.run_mode_epiannotation || params.run_mode_order) ?
-                input_data.map { args ->
+                roi_input_data.map { args ->
                     def sample_id = args[0]
                     def clairsto_output_dir = file("${params.output_path}/routine_epi2me/${sample_id}/clairsto_output")
                     def snv_vcf = file("${params.output_path}/routine_epi2me/${sample_id}/clairsto_output/snv.vcf.gz")
