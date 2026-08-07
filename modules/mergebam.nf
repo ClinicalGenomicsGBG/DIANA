@@ -5,16 +5,22 @@ nextflow.enable.dsl=2
 // Mergebam Pipeline: Merges multiple BAM files per sample and extracts regions of interest
 //---------------------------------------------------------------------
 
-// Load sample information from file mapping Sample_ID to Flow_cell_ID
+// Load sample information from file mapping Sample_ID to Flow_cell_ID when available.
+// If the file is missing, fall back to discovering samples from input_dir.
 def sample_info = [:]
-file(params.bam_sample_id_file).splitEachLine(~/\t| /) { fields ->
-    if (fields.size() == 2) {
-        if (fields[1] != '') { // Check if Flow Cell ID is not empty
-            sample_info[fields[0]] = fields[1] // Map Sample_ID to Flow_cell_ID
-        } else {
-            println "Skipping ${fields[0]}: Flow Cell ID is empty"
+def sample_id_file = file(params.bam_sample_id_file)
+if (sample_id_file.exists()) {
+    sample_id_file.splitEachLine(/\t| /) { fields ->
+        if (fields.size() == 2) {
+            if (fields[1] != '') { // Check if Flow Cell ID is not empty
+                sample_info[fields[0]] = fields[1] // Map Sample_ID to Flow_cell_ID
+            } else {
+                println "Skipping ${fields[0]}: Flow Cell ID is empty"
+            }
         }
     }
+} else {
+    log.warn "Sample ID file not found at ${params.bam_sample_id_file}; discovering samples from ${params.input_dir} instead"
 }
 
 //---------------------------------------------------------------------
@@ -71,17 +77,19 @@ workflow mergebam {
         start_time = new Date()
 
         // Print sample information when workflow is executed
-        sample_info.each { sample_id, flow_cell_id ->
-            println "Sample_id ${sample_id} with Flow Cell ID: ${flow_cell_id}"
+        if (sample_info) {
+            sample_info.each { sample_id, flow_cell_id ->
+                println "Sample_id ${sample_id} with Flow Cell ID: ${flow_cell_id}"
+            }
         }
 
-        // Process all samples listed in sample_info.txt
+        // Process all samples listed in sample_info.txt, or discover them from input_dir
         bam_files = Channel.fromPath("${params.input_dir}/**/bam_pass/*.bam")
             .map { bam ->
                 def sample_id = bam.getParent().getParent().getParent().getBaseName()
                 def flow_cell_id = sample_info[sample_id]
 
-                if (flow_cell_id) {
+                if (!sample_info || flow_cell_id) {
                     return tuple(sample_id, bam.toAbsolutePath())
                 } else {
                     return null

@@ -2030,17 +2030,18 @@ workflow annotation {
         }
 
                 // Run ACE analysis
+            def ace_thresholds_ch
             ace_tmc(ace_input)
-                
-            ace_thresholds = ace_tmc.out.threshold_value
-                .map { args -> 
+
+            ace_thresholds_ch = ace_tmc.out.threshold_value
+                .map { args ->
                     def sample_id = args[0]
                     def threshold = args[1]
                     println "Calculated threshold for ${sample_id}: ${threshold}"
                     tuple(sample_id, threshold.toFloat())
                 }
             } else {
-                ace_thresholds = Channel.empty()
+                ace_thresholds_ch = Channel.empty()
             }
 
             // Create final threshold mapping
@@ -2053,9 +2054,11 @@ workflow annotation {
             println "Final threshold mapping: ${final_thresholds}"
 
             // Create channel for annotatecnv based on run mode
+            def annotatecnv_source_ch
+
             if (params.run_mode_order || params.run_mode_epiannotation) {
                 // Use epi2me output paths when in run_mode_order or run_mode_epiannotation
-                annotatecnv_input = input_data
+                annotatecnv_source_ch = input_data
                     .map { args -> 
                         def sample_id = args[0]
                         def bam = args[1]
@@ -2091,7 +2094,7 @@ workflow annotation {
                     }
             } else {
                 // Use configured input folders when in standalone mode
-                annotatecnv_input = Channel.fromList(sample_thresholds.keySet().collect())
+                annotatecnv_source_ch = Channel.fromList(sample_thresholds.keySet().collect())
                     .map { sample_id ->
                         println "Processing sample: ${sample_id} from configured folders"
                         tuple(
@@ -2107,7 +2110,7 @@ workflow annotation {
             // Combine with thresholds and prepare final input
             // For run_mode_order and run_mode_epiannotation, we use calculated thresholds from ACE
             def annotatecnv_with_provided = (params.run_mode_order || params.run_mode_epiannotation) ?
-                annotatecnv_input.combine(ace_thresholds, by: 0).map { args ->
+                annotatecnv_source_ch.combine(ace_thresholds_ch, by: 0).map { args ->
                     def sample_id = args[0]
                     def segs_vcf = args[1]
                     def roi_protein_coding_bed = args[2]
@@ -2126,7 +2129,7 @@ workflow annotation {
                         file(params.cnv_genes_tuned)
                     )
                 } :
-                annotatecnv_input
+                annotatecnv_source_ch
                     .filter { args ->
                         def sample_id = args[0]
                         def segs_vcf = args[1]
@@ -2161,7 +2164,7 @@ workflow annotation {
             // For samples with calculated thresholds, combine with ace_thresholds
             def annotatecnv_with_calculated = (params.run_mode_order || params.run_mode_epiannotation) ?
                 Channel.empty() :  // Skip this in run_mode_order/run_mode_epiannotation since we handle it above
-                annotatecnv_input
+                annotatecnv_source_ch
                     .filter { args ->
                         def sample_id = args[0]
                         def segs_vcf = args[1]
@@ -2170,7 +2173,7 @@ workflow annotation {
                         def segs_bed = args[4]
                         !final_thresholds.containsKey(sample_id)
                     }
-                    .combine(ace_thresholds, by: 0)
+                    .combine(ace_thresholds_ch, by: 0)
                     .map { args ->
                         def sample_id = args[0]
                         def segs_vcf = args[1]
@@ -2191,11 +2194,11 @@ workflow annotation {
                     }
 
             // Combine both channels
-            annotatecnv_input = annotatecnv_with_provided.mix(annotatecnv_with_calculated)
+            def annotatecnv_input_final = annotatecnv_with_provided.mix(annotatecnv_with_calculated)
                 .view { "Annotatecnv input: $it" }
 
             // Run annotatecnv
-            annotatecnv(annotatecnv_input)
+            annotatecnv(annotatecnv_input_final)
             annotatecnv_results = annotatecnv.out
 
             // Run plot_genomic_regions for coverage analysis
