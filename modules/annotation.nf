@@ -125,7 +125,7 @@ process sturgeon {
     tuple val(sample_id), path("${sample_id}_bedmethyl_sturgeon_general.pdf"), optional: true, emit: sturgeon_pdf
     path("${sample_id}_bedmethyl_sturgeon_general.csv"), optional: true
 
-
+    script:
     """
     /sturgeon/venv/bin/sturgeon inputtobed -i $sturgeon_bed  -o ${sample_id}_bedmethyl_sturgeon.bed  -s modkit_pileup  --reference-genome hg38
 
@@ -717,27 +717,28 @@ process clair3_annotate_vep {
     tuple val(sample_id), path("${sample_id}_roi_pileup_annotateandfilter.csv"), path("${sample_id}_merge_annotateandfilter.csv"), emit: clair3output
 
     script:
-    def vep_args = """\
-        --format vcf --vcf \\
-        --compress_output bgzip \\
-        --assembly GRCh38 \\
-        --species homo_sapiens \\
-        --cache --dir_cache ${params.vep_cache_dir} --cache_version ${params.vep_cache_version} \\
-        --fasta ${params.reference_genome} \\
-        --offline --no_stats --fork ${task.cpus} \\
-        --force_overwrite \\
-        --symbol --biotype --canonical --mane --pick \\
-        --pick_order mane_select,mane_plus_clinical,canonical,appris,tsl,biotype,ccds,rank,length \\
-        --hgvs --protein \\
-        --sift b --polyphen b \\
-        --refseq \\
-        --custom file=${params.clinvar_vcf},short_name=ClinVar,format=vcf,type=exact,coords=0,fields=CLNSIG%CLNDN%CLNREVSTAT%CLNHGVS%CLNDISDB \\
-        --custom file=${params.cosmic_vcf},short_name=COSMIC,format=vcf,type=exact,coords=0,fields=GENE%CNT%ID"""
     """
     export PATH=${params.vep_bin_dir}:\$PATH
 
     # ── Pileup VCF ──────────────────────────────────────────────────────────
-    vep --input_file ${pileup_vcf} --output_file ${sample_id}_roi_pileup_vep.vcf.gz ${vep_args}
+    vep \
+        --input_file ${pileup_vcf} \
+        --output_file ${sample_id}_roi_pileup_vep.vcf.gz \
+        --format vcf --vcf \
+        --compress_output bgzip \
+        --assembly GRCh38 \
+        --species homo_sapiens \
+        --cache --dir_cache ${params.vep_cache_dir} --cache_version ${params.vep_cache_version} \
+        --fasta ${params.reference_genome} \
+        --offline --no_stats --fork ${task.cpus} \
+        --force_overwrite \
+        --symbol --biotype --canonical --mane --pick \
+        --pick_order mane_select,mane_plus_clinical,canonical,appris,tsl,biotype,ccds,rank,length \
+        --hgvs --protein \
+        --sift b --polyphen b \
+        --refseq \
+        --custom file=${params.clinvar_vcf},short_name=ClinVar,format=vcf,type=exact,coords=0,fields=CLNSIG%CLNDN%CLNREVSTAT%CLNHGVS%CLNDISDB \
+        --custom file=${params.cosmic_vcf},short_name=COSMIC,format=vcf,type=exact,coords=0,fields=GENE%CNT%ID
 
     filter_vep --format vcf \\
         --input_file ${sample_id}_roi_pileup_vep.vcf.gz \\
@@ -753,7 +754,24 @@ process clair3_annotate_vep {
     > ${sample_id}_roi_pileup_annotateandfilter.csv
 
     # ── Merge VCF ───────────────────────────────────────────────────────────
-    vep --input_file ${merge_vcf} --output_file ${sample_id}_roi_merge_vep.vcf.gz ${vep_args}
+    vep \
+        --input_file ${merge_vcf} \
+        --output_file ${sample_id}_roi_merge_vep.vcf.gz \
+        --format vcf --vcf \
+        --compress_output bgzip \
+        --assembly GRCh38 \
+        --species homo_sapiens \
+        --cache --dir_cache ${params.vep_cache_dir} --cache_version ${params.vep_cache_version} \
+        --fasta ${params.reference_genome} \
+        --offline --no_stats --fork ${task.cpus} \
+        --force_overwrite \
+        --symbol --biotype --canonical --mane --pick \
+        --pick_order mane_select,mane_plus_clinical,canonical,appris,tsl,biotype,ccds,rank,length \
+        --hgvs --protein \
+        --sift b --polyphen b \
+        --refseq \
+        --custom file=${params.clinvar_vcf},short_name=ClinVar,format=vcf,type=exact,coords=0,fields=CLNSIG%CLNDN%CLNREVSTAT%CLNHGVS%CLNDISDB \
+        --custom file=${params.cosmic_vcf},short_name=COSMIC,format=vcf,type=exact,coords=0,fields=GENE%CNT%ID
     cp ${sample_id}_roi_merge_vep.vcf.gz ${sample_id}_roi_merge.vep.vcf.gz
 
     filter_vep --format vcf \\
@@ -1832,13 +1850,11 @@ workflow annotation {
             // Standalone svannasv annotation mode skips this — MGMT processes never ran.
             def mgmt_section_ran = params.run_mode in ['mgmt', 'rmd', 'all'] || params.run_mode_order || params.run_mode_epiannotation
             if ((params.run_mode_order || params.run_mode_epiannotation || params.run_mode_annotation) && mgmt_section_ran) {
-                def sturgeon_pdf_ch
-                sturgeon_pdf_ch = sturgeon_available
-                    ? sturgeon.out.sturgeon_pdf
-                    : extract_epic.out.mnpflex_bed.map { sid, f -> tuple(sid, file("NO_STURGEON_PDF")) }
                 copy_results_to_summary(
                     extract_epic.out.mnpflex_bed,
-                    sturgeon_pdf_ch,
+                    sturgeon_available
+                        ? sturgeon.out.sturgeon_pdf
+                        : extract_epic.out.mnpflex_bed.map { sid, f -> tuple(sid, file("NO_STURGEON_PDF")) },
                     tsne_plot.out.tsne_html,
                     svannasv.out.rmdsvannahtml,
                     tsne_plot_pancan.out.tsne_pancan_html,
@@ -1854,20 +1870,20 @@ workflow annotation {
         if (params.run_mode in ['roi', 'rmd', 'all'] || params.run_mode_order) {
             println "Running ROI Analysis (annotation of pre-existing VCFs from epi2me)..."
 
-            def roi_input_data = input_data
-
             // Step 1: Create channels for VCF files
             // In epiannotation/order mode, derive from input_data to ensure dependency on epi2me completion
             // In standalone mode, create from sample list
-            def clair3_annot_input = (params.run_mode_epiannotation || params.run_mode_order) ?
-                roi_input_data.map { args ->
+            def clair3_annot_input
+            if (params.run_mode_epiannotation || params.run_mode_order) {
+                clair3_annot_input = input_data.map { args ->
                     def sample_id = args[0]
                     def clair3_output_dir = file("${params.output_path}/routine_epi2me/${sample_id}/output_clair3")
                     def pileup_vcf = file("${params.output_path}/routine_epi2me/${sample_id}/output_clair3/pileup.vcf.gz")
                     def merge_vcf = file("${params.output_path}/routine_epi2me/${sample_id}/output_clair3/merge_output.vcf.gz")
                     tuple(sample_id, clair3_output_dir, pileup_vcf, merge_vcf)
-                }.view { "Clair3 annotation input: $it" } :
-                Channel.fromList(sample_thresholds.keySet().collect())
+                }
+            } else {
+                clair3_annot_input = Channel.fromList(sample_thresholds.keySet().collect())
                     .map { sample_id ->
                         def clair3_output_dir = file("${params.output_path}/routine_epi2me/${sample_id}/output_clair3")
                         def pileup_vcf = file("${params.output_path}/routine_epi2me/${sample_id}/output_clair3/pileup.vcf.gz")
@@ -1879,17 +1895,20 @@ workflow annotation {
 
                         tuple(sample_id, clair3_output_dir, pileup_vcf, merge_vcf)
                     }
-                    .view { "Clair3 annotation input: $it" }
+            }
+            clair3_annot_input = clair3_annot_input.view { "Clair3 annotation input: $it" }
 
-            def clairsto_annot_input = (params.run_mode_epiannotation || params.run_mode_order) ?
-                roi_input_data.map { args ->
+            def clairsto_annot_input
+            if (params.run_mode_epiannotation || params.run_mode_order) {
+                clairsto_annot_input = input_data.map { args ->
                     def sample_id = args[0]
                     def clairsto_output_dir = file("${params.output_path}/routine_epi2me/${sample_id}/clairsto_output")
                     def snv_vcf = file("${params.output_path}/routine_epi2me/${sample_id}/clairsto_output/snv.vcf.gz")
                     def indel_vcf = file("${params.output_path}/routine_epi2me/${sample_id}/clairsto_output/indel.vcf.gz")
                     tuple(sample_id, clairsto_output_dir, snv_vcf, indel_vcf)
-                } :
-                Channel.fromList(sample_thresholds.keySet().collect())
+                }
+            } else {
+                clairsto_annot_input = Channel.fromList(sample_thresholds.keySet().collect())
                     .map { sample_id ->
                         def clairsto_output_dir = file("${params.output_path}/routine_epi2me/${sample_id}/clairsto_output")
                         def snv_vcf = file("${params.output_path}/routine_epi2me/${sample_id}/clairsto_output/snv.vcf.gz")
@@ -1901,7 +1920,8 @@ workflow annotation {
 
                         tuple(sample_id, clairsto_output_dir, snv_vcf, indel_vcf)
                     }
-                .view { "ClairSTo annotation input: $it" }
+            }
+            clairsto_annot_input = clairsto_annot_input.view { "ClairSTo annotation input: $it" }
 
             // Step 2: Run annotation processes (ANNOVAR or VEP based on snv_annotator param)
             def clair3_out_ch
@@ -2000,6 +2020,8 @@ workflow annotation {
             println "Samples needing ACE calculation: ${samples_needing_ace}"
             println "Samples with provided thresholds: ${samples_with_provided_threshold}"
 
+            def ace_thresholds_ch = Channel.empty()
+
             // Run ACE only for samples that need calculation (have null threshold)
             if (samples_needing_ace.size() > 0) {
         // For run_mode_epiannotation or run_mode_order, use RDS from input_data channel
@@ -2033,7 +2055,6 @@ workflow annotation {
         }
 
                 // Run ACE analysis
-            def ace_thresholds_ch
             ace_tmc(ace_input)
 
             ace_thresholds_ch = ace_tmc.out.threshold_value
@@ -2043,8 +2064,6 @@ workflow annotation {
                     println "Calculated threshold for ${sample_id}: ${threshold}"
                     tuple(sample_id, threshold.toFloat())
                 }
-            } else {
-                ace_thresholds_ch = Channel.empty()
             }
 
             // Create final threshold mapping
@@ -2564,3 +2583,4 @@ workflow annotation {
 //    return filename.split('\\.')[0]  // Get everything before the first dot
 //}
 //}
+
