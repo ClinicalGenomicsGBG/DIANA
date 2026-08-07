@@ -144,6 +144,27 @@ process extract_roi {
     """
 }
 
+// Build merged BAMs for standalone epi2me mode when raw bam_pass inputs are provided
+process prepare_epi2me_input_bam {
+    label 'roi_extraction'
+    publishDir "${params.merge_bam_folder}", mode: 'copy', overwrite: true
+
+    input:
+    tuple val(sample_id), path(bam_files)
+
+    output:
+    tuple val(sample_id), path("${sample_id}.merged.bam"), path("${sample_id}.merged.bam.bai"), emit: merged_input
+
+    script:
+    """
+    set -euo pipefail
+
+    printf '%s\n' ${bam_files.join(' ')} > bam_list.txt
+    samtools merge -@ ${task.cpus} -f ${sample_id}.merged.bam -b bam_list.txt
+    samtools index -@ ${task.cpus} ${sample_id}.merged.bam
+    """
+}
+
 // SNV calling using Clair3 for OCC (regions of interest) regions
 process run_clair3 {
     label 'clair3'
@@ -305,8 +326,8 @@ workflow epi2me {
 
         // Create input channel based on run mode
         // Use merged_data input for both run_mode_order and run_mode_epiannotation
-        input_channel = (params.run_mode_order || params.run_mode_epiannotation) ?
-            merged_data.map { sid, bam, bai, ref, ref_bai ->
+        if (params.run_mode_order || params.run_mode_epiannotation) {
+            input_channel = merged_data.map { sid, bam, bai, ref, ref_bai ->
                 tuple(
                     sid,
                     bam,
@@ -314,37 +335,99 @@ workflow epi2me {
                     ref,
                     ref_bai
                 )
-            } : Channel
-            .from(file(params.epi2me_sample_id_file).readLines())
-            .map { line ->
-                def fields = line.trim().split(/\s+/) as List
-                def sample_id = fields[0].trim()
-                // Try exact match first, then wildcard pattern
-                def bam = file("${params.merge_bam_folder}/${sample_id}.merged.bam")
-                def bai = file("${params.merge_bam_folder}/${sample_id}.merged.bam.bai")
-
-                // If exact match doesn't exist, try wildcard pattern
-                if (!bam.exists()) {
-                    bam = file("${params.merge_bam_folder}/${sample_id}.*.bam")
-                    bam = bam.find()
-                }
-                if (!bai.exists()) {
-                    bai = file("${params.merge_bam_folder}/${sample_id}.*.bam.bai")
-                    bai = bai.find()
-                }
-
-                if (!bam || !bai || !bam.exists() || !bai.exists()) {
-                    error "BAM file or index file not found for sample ID: ${sample_id}. Tried both exact match (${sample_id}.merged.bam) and wildcard pattern (${sample_id}.*.bam)"
-                }
-
-                return tuple(
-                    sample_id,
-                    bam,
-                    bai,
-                    reference_genome,
-                    reference_genome_bai
-                )
             }
+        } else {
+            sample_id_file = file(params.epi2me_sample_id_file)
+
+            if (sample_id_file.exists()) {
+                sample_ids_ch = Channel
+                    .from(sample_id_file.readLines())
+                    .map { line ->
+                        def fields = line.trim().split(/\s+/) as List
+                        fields[0].trim()
+                    }
+                    .filter { it }
+            } else {
+                if (!params.input_dir) {
+                    error "Sample ID file not found: ${params.epi2me_sample_id_file}. Provide --epi2me_sample_id_file or set --input_dir so sample IDs can be discovered from bam_pass files."
+                }
+
+                discovered_bams = file("${params.input_dir}/*/**/bam_pass/*.bam")
+                discovered_bam_list = discovered_bams instanceof List ? discovered_bams : [discovered_bams]
+                discovered_bam_list = discovered_bam_list.findAll { it && it.exists() && !it.name.endsWith('.bai') }
+
+                if (!discovered_bam_list) {
+                    error "Sample ID file not found (${params.epi2me_sample_id_file}) and no BAM files discovered under ${params.input_dir}/*/**/bam_pass/*.bam"
+                }
+
+                log.warn "Sample ID file not found. Auto-discovering sample IDs from ${params.input_dir}"
+
+                sample_ids_ch = Channel
+                    .from(discovered_bam_list)
+                    .map { bam -> bam.getParent().getParent().getParent().getBaseName() }
+                    .unique()
+            }
+
+            // Prefer already merged BAM files under merge_bam_folder
+            merged_ready_ch = sample_ids_ch
+                .map { sample_id ->
+                    def bam = file("${params.merge_bam_folder}/${sample_id}.merged.bam")
+                    def bai = file("${params.merge_bam_folder}/${sample_id}.merged.bam.bai")
+
+                    if (!bam.exists()) {
+                        def bam_candidates = file("${params.merge_bam_folder}/${sample_id}.*.bam")
+                        def bam_list = bam_candidates instanceof List ? bam_candidates : [bam_candidates]
+                        def filtered_bams = bam_list.findAll { it && it.exists() && !it.name.endsWith('.bai') }
+                        if (filtered_bams) {
+                            bam = filtered_bams[0]
+                        }
+                    }
+
+                    if (!bai.exists() && bam && bam.exists()) {
+                        def inferred_bai = file("${bam}.bai")
+                        if (inferred_bai.exists()) {
+                            bai = inferred_bai
+                        }
+                    }
+
+                    (bam && bai && bam.exists() && bai.exists()) ? tuple(sample_id, bam, bai) : null
+                }
+                .filter { it != null }
+
+            // Fallback: build merged BAM from raw bam_pass files in --input_dir
+            needs_prepare_ch = sample_ids_ch
+                .map { sample_id ->
+                    def bam = file("${params.merge_bam_folder}/${sample_id}.merged.bam")
+                    def bai = file("${params.merge_bam_folder}/${sample_id}.merged.bam.bai")
+
+                    if (bam.exists() && bai.exists()) {
+                        return null
+                    }
+
+                    if (!params.input_dir) {
+                        error "BAM file not found for sample ID: ${sample_id}. Provide merged BAMs in ${params.merge_bam_folder} or run with --input_dir to build from raw bam_pass files."
+                    }
+
+                    def raw_candidates = file("${params.input_dir}/${sample_id}/**/bam_pass/*.bam")
+                    def raw_list = raw_candidates instanceof List ? raw_candidates : [raw_candidates]
+                    raw_list = raw_list.findAll { it && it.exists() && !it.name.endsWith('.bai') }
+
+                    if (!raw_list) {
+                        error "BAM file not found for sample ID: ${sample_id}. Tried merged BAMs in ${params.merge_bam_folder} and raw BAMs in ${params.input_dir}/${sample_id}/**/bam_pass/*.bam"
+                    }
+
+                    tuple(sample_id, raw_list)
+                }
+                .filter { it != null }
+
+            prepared_bam_ch = prepare_epi2me_input_bam(needs_prepare_ch).merged_input
+
+            input_channel = merged_ready_ch
+                .mix(prepared_bam_ch)
+                .map { sid, bam, bai ->
+                    tuple(sid, bam, bai, reference_genome, reference_genome_bai)
+                }
+        }
 
         // Run processes based on mode
         modkit_ch = Channel.empty()
@@ -396,16 +479,16 @@ workflow epi2me {
             println "Running SNV calling (Clair3 and ClairS-TO)..."
 
             // Load annotation files as channels
-            def refgene_ch = Channel.value(file(params.refgene))
-            def hg38_refgenemrna_ch = Channel.value(file(params.hg38_refgenemrna))
-            def clinvar_ch = Channel.value(file(params.clinvar))
-            def clinvarindex_ch = Channel.value(file(params.clinvarindex))
-            def hg38_cosmic100_ch = Channel.value(file(params.hg38_cosmic100))
-            def hg38_cosmic100index_ch = Channel.value(file(params.hg38_cosmic100index))
-            def roi_protein_coding_bed_ch = Channel.value(file(params.roi_protein_coding_bed))
+            refgene_ch = Channel.value(file(params.refgene))
+            hg38_refgenemrna_ch = Channel.value(file(params.hg38_refgenemrna))
+            clinvar_ch = Channel.value(file(params.clinvar))
+            clinvarindex_ch = Channel.value(file(params.clinvarindex))
+            hg38_cosmic100_ch = Channel.value(file(params.hg38_cosmic100))
+            hg38_cosmic100index_ch = Channel.value(file(params.hg38_cosmic100index))
+            roi_protein_coding_bed_ch = Channel.value(file(params.roi_protein_coding_bed))
 
             // Prepare input for Clair3 (OCC BAM + annotation files)
-            def clair3_input = occ_input_channel
+            clair3_input = occ_input_channel
                 .combine(refgene_ch)
                 .combine(hg38_refgenemrna_ch)
                 .combine(clinvar_ch)
@@ -414,7 +497,7 @@ workflow epi2me {
                 .combine(hg38_cosmic100index_ch)
 
             // Prepare input for ClairS-TO (OCC BAM + annotation files + OCC BED)
-            def clairsto_input = occ_input_channel
+            clairsto_input = occ_input_channel
                 .combine(refgene_ch)
                 .combine(hg38_refgenemrna_ch)
                 .combine(clinvar_ch)
@@ -424,10 +507,10 @@ workflow epi2me {
                 .combine(roi_protein_coding_bed_ch)
 
             // Run variant calling processes
-            def clair3_result = run_clair3(clair3_input)
+            clair3_result = run_clair3(clair3_input)
             clair3_ch = clair3_result.clair3_output_dir  // Use one of the outputs for dependency tracking
 
-            def clairsto_result = run_clairs_to(clairsto_input)
+            clairsto_result = run_clairs_to(clairsto_input)
             clairsto_ch = clairsto_result.clairsto_output_dir  // Use one of the outputs for dependency tracking
         }
 
@@ -436,10 +519,10 @@ workflow epi2me {
             println "Running Cramino statistics..."
 
             // Cramino uses merged BAM files
-            def cramino_input = input_channel
+            cramino_input = input_channel
                 .view { "Cramino input: $it" }
 
-            def cramino_result = cramino_report(cramino_input)
+            cramino_result = cramino_report(cramino_input)
             cramino_ch = cramino_result.craminostatout  // Use the output for dependency tracking
         }
 
@@ -500,7 +583,7 @@ workflow epi2me {
             // NOTE: must use .combine() not .cross() — .cross() consumes the barrier item once,
             // so only the first sample passes; all remaining samples are silently dropped.
             // .combine() creates a cartesian product: every sample pairs with the single barrier.
-            def snv_cramino_barrier = clair3_ch
+            snv_cramino_barrier = clair3_ch
                 .mix(clairsto_ch)
                 .mix(cramino_ch)
                 .collect()
