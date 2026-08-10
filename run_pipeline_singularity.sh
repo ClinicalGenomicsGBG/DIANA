@@ -25,6 +25,46 @@ fi
 
 echo "Using: $SINGULARITY_CMD"
 
+# Use nextflow.config include logic for all modes.
+# Passing extra -c mode configs can cause duplicate evaluation of top-level config methods.
+if [[ "$*" == *"--run_mode_epiannotation"* ]]; then
+    echo " Using combined Epi2me + Annotation mode (loaded by nextflow.config)"
+elif [[ "$*" == *"--run_mode_order"* ]]; then
+    echo " Using sequential order mode (loaded by nextflow.config)"
+elif [[ "$*" == *"--run_mode_epi2me"* ]]; then
+    echo " Using Epi2me mode (loaded by nextflow.config)"
+elif [[ "$*" == *"--run_mode_mergebam"* ]]; then
+    echo " Using Mergebam mode (loaded by nextflow.config)"
+else
+    echo " Using default annotation mode (loaded by nextflow.config)"
+fi
+#!/bin/bash
+
+# Diana Pipeline Runner Script for Singularity/Apptainer
+set -e
+
+# Check if Nextflow is installed
+if ! command -v nextflow &> /dev/null; then
+    echo " Nextflow is not installed."
+    echo "   Please run setup_pipeline.sh first: ./setup_pipeline.sh singularity"
+    echo "   Or source .diana_env if setup was already done: source .diana_env"
+    exit 1
+fi
+
+# Check if Singularity/Apptainer is available
+SINGULARITY_CMD=""
+if command -v apptainer &> /dev/null; then
+    SINGULARITY_CMD="apptainer"
+elif command -v singularity &> /dev/null; then
+    SINGULARITY_CMD="singularity"
+else
+    echo " Neither Singularity nor Apptainer is available."
+    echo "   Please run setup_singularity.sh first."
+    exit 1
+fi
+
+echo "Using: $SINGULARITY_CMD"
+
 # Auto-detect config file based on arguments
 # For epiannotation and order modes, nextflow.config handles loading multiple configs
 CONFIG=""
@@ -62,3 +102,4 @@ else
 fi
 
 echo " Pipeline completed successfully!"
+
