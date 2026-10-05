@@ -934,7 +934,7 @@ process plot_genomic_regions {
     """
     eval \"\$(micromamba shell hook --shell bash)\"
     micromamba activate gviz_env
-    plot_genomic_regions_v2.R \
+    plot_genomic_regions.R \
         "${gviz_data}" \
         "${sample_id}" \
         "${bam_file}" \
