@@ -1,6 +1,5 @@
 #!/usr/bin/env Rscript
 
-# Parse command line arguments
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) != 8) {
     stop("Usage: plot_genomic_regions_v2.R <gviz_data> <sample_id> <bam_file> <output_egfr_coverage> <output_idh1_coverage> <output_idh2_coverage> <output_tertp_coverage> <cytoband_file>")
@@ -22,10 +21,26 @@ suppressPackageStartupMessages({
     library(GenomicAlignments)
 })
 
-# Load BSgenome for reference sequence display in IDH1/IDH2/TERTp plots.
-# showMismatch=FALSE on AlignmentsTrack prevents sequenceLayer from running
-# (avoiding the off-limits crash), while SequenceTrack still renders the
-# reference base row that shows the amino acid context.
+if (!file.exists(bam_file)) stop(sprintf("BAM file not found: %s", bam_file))
+
+# Detect chromosome naming convention from BAM header once.
+# bam_chr() produces the right name for AlignmentsTrack / plotTracks / DataTrack.
+# ucsc_chr() always adds "chr" — required by BSgenome.Hsapiens.UCSC.hg38 and
+# the cytoband file (both use UCSC naming regardless of BAM convention).
+chr_prefix <- tryCatch({
+    targets <- names(scanBamHeader(bam_file)[[1]]$targets)
+    if (any(grepl("^chr", targets))) "chr" else ""
+}, error = function(e) {
+    message("Could not read BAM header for chr detection, assuming UCSC (chr): ",
+            conditionMessage(e))
+    "chr"
+})
+message("Chromosome prefix detected: '", chr_prefix, "'")
+
+bam_chr  <- function(chrom) paste0(chr_prefix, chrom)
+ucsc_chr <- function(chrom) paste0("chr", chrom)
+
+# Load BSgenome — optional; fallback omits the SequenceTrack row.
 has_bsgenome <- tryCatch({
     suppressPackageStartupMessages(library(BSgenome.Hsapiens.UCSC.hg38))
     TRUE
@@ -37,22 +52,18 @@ has_bsgenome <- tryCatch({
 
 gvizobject <- load(gviz_data_path)
 
-if (!file.exists(bam_file)) {
-    stop(sprintf("BAM file not found: %s", bam_file))
-}
-
-
-createCustomIdeogram <- function(chromosome) {
+# Cytoband file uses UCSC chr names; IdeogramTrack chromosome uses BAM convention.
+createCustomIdeogram <- function(chrom) {
     bands_df <- read.table(
         cytoband_file,
         sep = "\t",
         col.names = c("chrom", "chromStart", "chromEnd", "name", "gieStain"),
         stringsAsFactors = FALSE
     )
-    bands_df <- bands_df[bands_df$chrom == paste0("chr", chromosome), ]
+    bands_df <- bands_df[bands_df$chrom == ucsc_chr(chrom), ]
     IdeogramTrack(
         genome     = "hg38",
-        chromosome = chromosome,
+        chromosome = bam_chr(chrom),
         bands      = bands_df,
         showId     = TRUE,
         showBandId = TRUE,
@@ -61,47 +72,37 @@ createCustomIdeogram <- function(chromosome) {
 }
 
 # ── EGFR ─────────────────────────────────────────────────────────────────────
-# AlignmentsTrack triggers sequenceLayer even with type="coverage" because Gviz
-# auto-detects the hg38 genome from the BAM header and loads BSgenome.
-# Fix: compute coverage with Rsamtools and plot with DataTrack, which never
-# calls sequenceLayer. Rsamtools is a dependency of Gviz so it should be
-# present; fall back to gene-annotation-only plot if not.
+# Use Rsamtools DataTrack (coverage histogram) instead of AlignmentsTrack so
+# sequenceLayer is never triggered for the wide EGFR window.
 EGFR_FROM <- 55019017
 EGFR_TO   <- 55211628
 
 pdf(egfr_output, width = 10, height = 6)
 tryCatch({
+    chr7   <- bam_chr("7")
     itrack <- createCustomIdeogram("7")
     gtrack <- GenomeAxisTrack()
 
     message("EGFR_annot class: ", paste(class(EGFR_annot), collapse = ", "))
-    annot_is_seq <- inherits(EGFR_annot, "SequenceTrack")
-    egfr_annot_tracks <- if (annot_is_seq) list() else list(EGFR_annot)
+    egfr_annot_tracks <- if (inherits(EGFR_annot, "SequenceTrack")) list() else list(EGFR_annot)
 
-    has_rsamtools <- requireNamespace("Rsamtools", quietly = TRUE) &&
-                     requireNamespace("GenomicAlignments", quietly = TRUE)
+    bam_obj  <- Rsamtools::BamFile(bam_file)
+    gr       <- GRanges(chr7, IRanges(EGFR_FROM, EGFR_TO))
+    egfr_cov <- tryCatch({
+        cov <- GenomicAlignments::coverage(bam_obj,
+                   param = Rsamtools::ScanBamParam(which = gr))[[chr7]]
+        as.numeric(cov[EGFR_FROM:EGFR_TO])
+    }, error = function(e) {
+        message("EGFR coverage computation failed: ", conditionMessage(e)); NULL
+    })
 
-    if (has_rsamtools) {
-        # Compute per-base coverage; try UCSC (chr7) then Ensembl (7) naming
-        bam_obj  <- Rsamtools::BamFile(bam_file)
-        egfr_cov <- NULL
-        for (chr_name in c("chr7", "7")) {
-            egfr_cov <- tryCatch({
-                gr  <- GRanges(chr_name, IRanges(EGFR_FROM, EGFR_TO))
-                cov <- GenomicAlignments::coverage(bam_obj,
-                           param = Rsamtools::ScanBamParam(which = gr))[[chr_name]]
-                as.numeric(cov[EGFR_FROM:EGFR_TO])
-            }, error = function(e) NULL)
-            if (!is.null(egfr_cov)) { message("BAM chr name: ", chr_name); break }
-        }
-        if (is.null(egfr_cov)) stop("Could not read BAM coverage for EGFR region")
-
+    if (!is.null(egfr_cov)) {
         cov_pos   <- EGFR_FROM:EGFR_TO
         cov_track <- DataTrack(
             data       = egfr_cov,
             start      = cov_pos,
             end        = cov_pos,
-            chromosome = "chr7",
+            chromosome = chr7,
             genome     = "hg38",
             name       = "EGFR",
             type       = "h",
@@ -112,23 +113,22 @@ tryCatch({
             trackList  = cov_track,
             start      = c(55142193, 55154167),
             width      = 10,
-            chromosome = "chr7"
+            chromosome = chr7
         )
         plotTracks(
             c(list(itrack, gtrack), egfr_annot_tracks, list(ht)),
             from       = EGFR_FROM,
             to         = EGFR_TO,
-            chromosome = "chr7",
+            chromosome = chr7,
             cex        = 0.9
         )
     } else {
-        # Rsamtools not available — show gene annotation only (no coverage)
-        message("Rsamtools not available — plotting EGFR annotation only")
+        message("Plotting EGFR annotation only (coverage unavailable)")
         plotTracks(
             c(list(itrack, gtrack), egfr_annot_tracks),
             from       = EGFR_FROM,
             to         = EGFR_TO,
-            chromosome = "7",
+            chromosome = chr7,
             cex        = 0.9
         )
     }
@@ -140,20 +140,19 @@ tryCatch({
 dev.off()
 
 # ── IDH1 p.R132 ──────────────────────────────────────────────────────────────
-# Chromosome 2, reverse-strand gene.
-# Strategy: SequenceTrack shows the reference base row (amino acid context);
-# showMismatch=FALSE prevents sequenceLayer from being called so ONT reads
-# that extend far beyond the 35 bp window cannot trigger the off-limits crash.
-# Falls back to pileup-only if SequenceTrack still causes an error.
+# showMismatch=FALSE prevents sequenceLayer from being called — avoids the
+# off-limits crash with long ONT reads at this 35 bp window.
+# Falls back to pileup without SequenceTrack if BSgenome is unavailable.
 pdf(idh1_output, width = 10, height = 6)
 tryCatch({
+    chr2   <- bam_chr("2")
     itrack <- createCustomIdeogram("2")
     gtrack <- GenomeAxisTrack()
 
     idh1_plotted <- FALSE
     if (has_bsgenome) {
         tryCatch({
-            sTrack       <- SequenceTrack(Hsapiens, chromosome = "2")
+            sTrack       <- SequenceTrack(Hsapiens, chromosome = ucsc_chr("2"))
             Sample_track <- AlignmentsTrack(bam_file, name = "IDH1 p.R132",
                                             reverseStacking = TRUE,
                                             showMismatch    = FALSE)
@@ -161,11 +160,11 @@ tryCatch({
                 trackList  = list(sTrack, Sample_track),
                 start      = c(208248387),
                 width      = 2,
-                chromosome = "2"
+                chromosome = chr2
             )
             plotTracks(
                 list(itrack, gtrack, ht),
-                chromosome = "2",
+                chromosome = chr2,
                 from       = 208248370,
                 to         = 208248405,
                 type       = "pileup",
@@ -184,11 +183,11 @@ tryCatch({
             trackList  = Sample_track,
             start      = c(208248387),
             width      = 2,
-            chromosome = "2"
+            chromosome = chr2
         )
         plotTracks(
             list(itrack, gtrack, ht),
-            chromosome = "2",
+            chromosome = chr2,
             from       = 208248370,
             to         = 208248405,
             type       = "pileup",
@@ -203,16 +202,16 @@ tryCatch({
 dev.off()
 
 # ── IDH2 p.R172 ──────────────────────────────────────────────────────────────
-# Chromosome 15, reverse-strand gene.
 pdf(idh2_output, width = 10, height = 6)
 tryCatch({
+    chr15  <- bam_chr("15")
     itrack <- createCustomIdeogram("15")
     gtrack <- GenomeAxisTrack()
 
     idh2_plotted <- FALSE
     if (has_bsgenome) {
         tryCatch({
-            sTrack       <- SequenceTrack(Hsapiens, chromosome = "15")
+            sTrack       <- SequenceTrack(Hsapiens, chromosome = ucsc_chr("15"))
             Sample_track <- AlignmentsTrack(bam_file, name = "IDH2 p.R172",
                                             reverseStacking = TRUE,
                                             showMismatch    = FALSE)
@@ -220,11 +219,11 @@ tryCatch({
                 trackList  = list(sTrack, Sample_track),
                 start      = c(90088605),
                 width      = 2,
-                chromosome = "15"
+                chromosome = chr15
             )
             plotTracks(
                 list(itrack, gtrack, ht),
-                chromosome = "15",
+                chromosome = chr15,
                 from       = 90088587,
                 to         = 90088622,
                 type       = "pileup",
@@ -243,11 +242,11 @@ tryCatch({
             trackList  = Sample_track,
             start      = c(90088605),
             width      = 2,
-            chromosome = "15"
+            chromosome = chr15
         )
         plotTracks(
             list(itrack, gtrack, ht),
-            chromosome = "15",
+            chromosome = chr15,
             from       = 90088587,
             to         = 90088622,
             type       = "pileup",
@@ -262,16 +261,16 @@ tryCatch({
 dev.off()
 
 # ── TERTp ─────────────────────────────────────────────────────────────────────
-# Chromosome 5, reverse-strand promoter region.
 pdf(tertp_output, width = 10, height = 6)
 tryCatch({
+    chr5   <- bam_chr("5")
     itrack <- createCustomIdeogram("5")
     gtrack <- GenomeAxisTrack()
 
     tertp_plotted <- FALSE
     if (has_bsgenome) {
         tryCatch({
-            sTrack       <- SequenceTrack(Hsapiens, chromosome = "5")
+            sTrack       <- SequenceTrack(Hsapiens, chromosome = ucsc_chr("5"))
             Sample_track <- AlignmentsTrack(bam_file, name = "TERTp",
                                             reverseStacking = TRUE,
                                             showMismatch    = FALSE)
@@ -279,12 +278,12 @@ tryCatch({
                 trackList  = list(sTrack, Sample_track),
                 start      = c(1295113, 1295135),
                 width      = 0,
-                chromosome = "5",
+                chromosome = chr5,
                 name       = "TERTp"
             )
             plotTracks(
                 list(itrack, gtrack, ht),
-                chromosome = "5",
+                chromosome = chr5,
                 from       = 1295103,
                 to         = 1295145,
                 type       = "pileup",
@@ -303,12 +302,12 @@ tryCatch({
             trackList  = Sample_track,
             start      = c(1295113, 1295135),
             width      = 0,
-            chromosome = "5",
+            chromosome = chr5,
             name       = "TERTp"
         )
         plotTracks(
             list(itrack, gtrack, ht),
-            chromosome = "5",
+            chromosome = chr5,
             from       = 1295103,
             to         = 1295145,
             type       = "pileup",
