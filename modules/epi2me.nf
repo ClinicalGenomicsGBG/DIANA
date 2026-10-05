@@ -388,43 +388,6 @@ workflow epi2me {
                     ref,
                     ref_bai
                 )
-            } : Channel
-            .from(file(params.epi2me_sample_id_file).readLines())
-            .map { line ->
-                def fields = line.trim().split(/\s+/) as List
-                def sample_id = fields[0].trim()
-                // Try exact match first, then wildcard pattern
-                def bam = file("${params.merge_bam_folder}/${sample_id}.merged.bam")
-                def bai = file("${params.merge_bam_folder}/${sample_id}.merged.bam.bai")
-
-                // If exact match doesn't exist, try wildcard pattern
-                if (!bam.exists()) {
-                    bam = file("${params.merge_bam_folder}/${sample_id}.*.bam")
-                    bam = bam.find()
-                }
-                if (!bai.exists()) {
-                    bai = file("${params.merge_bam_folder}/${sample_id}.*.bam.bai")
-                    bai = bai.find()
-                }
-
-                if (!bam || !bai || !bam.exists() || !bai.exists()) {
-                    def existingRoiBam = file("${params.roi_bam_folder}/${sample_id}.roi.bam")
-                    def existingRoiBai = file("${params.roi_bam_folder}/${sample_id}.roi.bam.bai")
-                    def roiBamAlreadyExists = existingRoiBam.exists() && existingRoiBai.exists()
-                    if (!(params.run_mode == 'snv' && roiBamAlreadyExists)) {
-                        error "BAM file or index file not found for sample ID: ${sample_id}. Tried both exact match (${sample_id}.merged.bam) and wildcard pattern (${sample_id}.*.bam)"
-                    }
-                    bam = null
-                    bai = null
-                }
-
-                return tuple(
-                    sample_id,
-                    bam,
-                    bai,
-                    reference_genome,
-                    reference_genome_bai
-                )
             }
         } else {
             sample_id_file = file(params.epi2me_sample_id_file)
