@@ -390,7 +390,8 @@ workflow epi2me {
                 )
             }
         } else {
-            sample_id_file = file(params.epi2me_sample_id_file)
+            def sample_id_file = file(params.epi2me_sample_id_file)
+            def sample_ids_ch
 
             if (sample_id_file.exists()) {
                 sample_ids_ch = Channel
@@ -405,8 +406,8 @@ workflow epi2me {
                     error "Sample ID file not found: ${params.epi2me_sample_id_file}. Provide --epi2me_sample_id_file or set --input_dir so sample IDs can be discovered from bam_pass files."
                 }
 
-                discovered_bams = file("${params.input_dir}/*/**/bam_pass/*.bam")
-                discovered_bam_list = discovered_bams instanceof List ? discovered_bams : [discovered_bams]
+                def discovered_bams = file("${params.input_dir}/*/**/bam_pass/*.bam")
+                def discovered_bam_list = discovered_bams instanceof List ? discovered_bams : [discovered_bams]
                 discovered_bam_list = discovered_bam_list.findAll { it && it.exists() && !it.name.endsWith('.bai') }
 
                 if (!discovered_bam_list) {
@@ -422,7 +423,7 @@ workflow epi2me {
             }
 
             // Prefer already merged BAM files under merge_bam_folder
-            merged_ready_ch = sample_ids_ch
+            def merged_ready_ch = sample_ids_ch
                 .map { sample_id ->
                     def bam = file("${params.merge_bam_folder}/${sample_id}.merged.bam")
                     def bai = file("${params.merge_bam_folder}/${sample_id}.merged.bam.bai")
@@ -448,7 +449,7 @@ workflow epi2me {
                 .filter { it != null }
 
             // Fallback: build merged BAM from raw bam_pass files in --input_dir
-            needs_prepare_ch = sample_ids_ch
+            def needs_prepare_ch = sample_ids_ch
                 .map { sample_id ->
                     def bam = file("${params.merge_bam_folder}/${sample_id}.merged.bam")
                     def bai = file("${params.merge_bam_folder}/${sample_id}.merged.bam.bai")
@@ -473,7 +474,7 @@ workflow epi2me {
                 }
                 .filter { it != null }
 
-            prepared_bam_ch = prepare_epi2me_input_bam(needs_prepare_ch).merged_input
+            def prepared_bam_ch = prepare_epi2me_input_bam(needs_prepare_ch).merged_input
 
             input_channel = merged_ready_ch
                 .mix(prepared_bam_ch)
@@ -518,7 +519,7 @@ workflow epi2me {
             ).roi_bam
         }
 
-        roi_input_channel = roi_bam_ch
+        def roi_input_channel = roi_bam_ch
             .map { sid, roi_bam, roi_bai ->
                 tuple(sid, roi_bam, roi_bai, file(params.reference_genome), file(params.reference_genome_bai))
             }
