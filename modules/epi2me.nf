@@ -358,11 +358,11 @@ workflow epi2me {
         }
 
         // Create file objects for reference files
-        reference_genome = file(params.reference_genome)
-        reference_genome_bai = file(params.reference_genome_bai)
-        episv = file(params.episv)
-        epimodkit = file(params.epimodkit)
-        epicnv = file(params.epicnv)    
+        def reference_genome = file(params.reference_genome)
+        def reference_genome_bai = file(params.reference_genome_bai)
+        def episv = file(params.episv)
+        def epimodkit = file(params.epimodkit)
+        def epicnv = file(params.epicnv)
 
         // Validate reference files exist
         if (!reference_genome.exists()) {
@@ -379,6 +379,7 @@ workflow epi2me {
 
         // Create input channel based on run mode
         // Use merged_data input for both run_mode_order and run_mode_epiannotation
+        input_channel = Channel.empty()
         if (params.run_mode_order || params.run_mode_epiannotation) {
             input_channel = merged_data.map { sid, bam, bai, ref, ref_bai ->
                 tuple(
