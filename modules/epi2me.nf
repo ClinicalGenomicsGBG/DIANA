@@ -550,13 +550,13 @@ workflow epi2me {
             println "Running SNV calling (Clair3 and ClairS-TO)..."
 
             // Load annotation files as channels
-            refgene_ch = Channel.value(file(params.refgene))
-            hg38_refgenemrna_ch = Channel.value(file(params.hg38_refgenemrna))
-            clinvar_ch = Channel.value(file(params.clinvar))
-            clinvarindex_ch = Channel.value(file(params.clinvarindex))
-            hg38_cosmic100_ch = Channel.value(file(params.hg38_cosmic100))
-            hg38_cosmic100index_ch = Channel.value(file(params.hg38_cosmic100index))
-            roi_protein_coding_bed_ch = Channel.value(file(params.roi_protein_coding_bed))
+            def refgene_ch = Channel.value(file(params.refgene))
+            def hg38_refgenemrna_ch = Channel.value(file(params.hg38_refgenemrna))
+            def clinvar_ch = Channel.value(file(params.clinvar))
+            def clinvarindex_ch = Channel.value(file(params.clinvarindex))
+            def hg38_cosmic100_ch = Channel.value(file(params.hg38_cosmic100))
+            def hg38_cosmic100index_ch = Channel.value(file(params.hg38_cosmic100index))
+            def roi_protein_coding_bed_ch = Channel.value(file(params.roi_protein_coding_bed))
 
             // Prepare input for Clair3 (OCC BAM + annotation files)
             def clair3_input = roi_input_channel
@@ -578,10 +578,10 @@ workflow epi2me {
                 .combine(roi_protein_coding_bed_ch)
 
             // Run variant calling processes
-            clair3_result = run_clair3(clair3_input)
+            def clair3_result = run_clair3(clair3_input)
             clair3_ch = clair3_result.clair3_output_dir  // Use one of the outputs for dependency tracking
 
-            clairsto_result = run_clairs_to(clairsto_input)
+            def clairsto_result = run_clairs_to(clairsto_input)
             clairsto_ch = clairsto_result.clairsto_output_dir  // Use one of the outputs for dependency tracking
             clairsto_snv_vcf_ch = clairsto_result.snv_vcf
         }
@@ -598,10 +598,10 @@ workflow epi2me {
             println "Running Cramino statistics..."
 
             // Cramino uses merged BAM files
-            cramino_input = input_channel
+            def cramino_input = input_channel
                 .view { "Cramino input: $it" }
 
-            cramino_result = cramino_report(cramino_input)
+            def cramino_result = cramino_report(cramino_input)
             cramino_ch = cramino_result.craminostatout  // Use the output for dependency tracking
         }
 
@@ -662,7 +662,7 @@ workflow epi2me {
             // NOTE: must use .combine() not .cross() — .cross() consumes the barrier item once,
             // so only the first sample passes; all remaining samples are silently dropped.
             // .combine() creates a cartesian product: every sample pairs with the single barrier.
-            snv_cramino_barrier = clair3_ch
+            def snv_cramino_barrier = clair3_ch
                 .mix(clairsto_ch)
                 .mix(cramino_ch)
                 .mix(baf_ch)
