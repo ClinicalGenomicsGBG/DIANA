@@ -144,27 +144,6 @@ process extract_roi {
     """
 }
 
-// Build merged BAMs for standalone epi2me mode when raw bam_pass inputs are provided
-process prepare_epi2me_input_bam {
-    label 'roi_extraction'
-    publishDir "${params.merge_bam_folder}", mode: 'copy', overwrite: true
-
-    input:
-    tuple val(sample_id), path(bam_files)
-
-    output:
-    tuple val(sample_id), path("${sample_id}.merged.bam"), path("${sample_id}.merged.bam.bai"), emit: merged_input
-
-    script:
-    """
-    set -euo pipefail
-
-    printf '%s\n' ${bam_files.join(' ')} > bam_list.txt
-    samtools merge -@ ${task.cpus} -f ${sample_id}.merged.bam -b bam_list.txt
-    samtools index -@ ${task.cpus} ${sample_id}.merged.bam
-    """
-}
-
 // SNV calling using Clair3 for OCC (regions of interest) regions
 process run_clair3 {
     label 'clair3'
