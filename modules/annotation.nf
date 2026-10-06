@@ -1841,10 +1841,10 @@ workflow annotation {
             // Standalone svannasv annotation mode skips this — MGMT processes never ran.
             def mgmt_section_ran = params.run_mode in ['mgmt', 'rmd', 'all'] || params.run_mode_order || params.run_mode_epiannotation
             if ((params.run_mode_order || params.run_mode_epiannotation || params.run_mode_annotation) && mgmt_section_ran) {
-                def sturgeon_pdf_ch = sturgeon_available
+                sturgeon_pdf_ch = sturgeon_available
                     ? sturgeon.out.sturgeon_pdf
                     : extract_epic.out.mnpflex_bed.map { sid, f -> tuple(sid, file("NO_STURGEON_PDF")) }
-                def copy_results_input = extract_epic.out.mnpflex_bed
+                copy_results_input = extract_epic.out.mnpflex_bed
                     .join(sturgeon_pdf_ch)
                     .join(tsne_plot.out.tsne_html)
                     .join(svannasv.out.rmdsvannahtml)
@@ -1935,7 +1935,7 @@ workflow annotation {
             }
 
             // Step 3: Create properly structured channels for combination
-            def clair3_results = clair3_out_ch
+            clair3_results = clair3_out_ch
                 .map { args ->
                     def sample_id = args[0]
                     def pileup_file = args[1]
@@ -1944,7 +1944,7 @@ workflow annotation {
                 }
                 .view { "Clair3 annotated mapped: $it" }
 
-            def clairsto_results = clairsto_out_ch
+            clairsto_results = clairsto_out_ch
                 .view { "ClairSTo annotated output: $it" }
 
             // Step 4: Combine results and create input for merge_annotation
@@ -2013,7 +2013,7 @@ workflow annotation {
             println "Samples needing ACE calculation: ${samples_needing_ace}"
             println "Samples with provided thresholds: ${samples_with_provided_threshold}"
 
-            def ace_thresholds_ch = Channel.empty()
+            ace_thresholds_ch = Channel.empty()
 
             // Run ACE only for samples that need calculation (have null threshold)
             if (samples_needing_ace.size() > 0) {
@@ -2069,7 +2069,7 @@ workflow annotation {
             println "Final threshold mapping: ${final_thresholds}"
 
             // Create channel for annotatecnv based on run mode
-            def annotatecnv_source_ch
+            annotatecnv_source_ch = Channel.empty()
 
             if (params.run_mode_order || params.run_mode_epiannotation) {
                 // Use epi2me output paths when in run_mode_order or run_mode_epiannotation
@@ -2124,7 +2124,7 @@ workflow annotation {
 
             // Combine with thresholds and prepare final input
             // For run_mode_order and run_mode_epiannotation, we use calculated thresholds from ACE
-            def annotatecnv_with_provided = (params.run_mode_order || params.run_mode_epiannotation) ?
+            annotatecnv_with_provided = (params.run_mode_order || params.run_mode_epiannotation) ?
                 annotatecnv_source_ch.combine(ace_thresholds_ch, by: 0).map { args ->
                     def sample_id = args[0]
                     def segs_vcf = args[1]
@@ -2177,7 +2177,7 @@ workflow annotation {
                     }
 
             // For samples with calculated thresholds, combine with ace_thresholds
-            def annotatecnv_with_calculated = (params.run_mode_order || params.run_mode_epiannotation) ?
+            annotatecnv_with_calculated = (params.run_mode_order || params.run_mode_epiannotation) ?
                 Channel.empty() :  // Skip this in run_mode_order/run_mode_epiannotation since we handle it above
                 annotatecnv_source_ch
                     .filter { args ->
@@ -2209,7 +2209,7 @@ workflow annotation {
                     }
 
             // Combine both channels
-            def annotatecnv_input_final = annotatecnv_with_provided.mix(annotatecnv_with_calculated)
+            annotatecnv_input_final = annotatecnv_with_provided.mix(annotatecnv_with_calculated)
                 .view { "Annotatecnv input: $it" }
 
             // Run annotatecnv
@@ -2367,7 +2367,9 @@ workflow annotation {
                 // Read pre-existing VCF files from epi2me output directory
 
                 // Step 1: Read pre-existing VCF files
-                def clair3_annot_input = Channel.fromList(sample_thresholds.keySet().collect())
+                // Use distinct names (_rmd suffix) to avoid Groovy scope collision with
+                // the clair3_annot_input declared in the ROI if-block above.
+                clair3_annot_input_rmd = Channel.fromList(sample_thresholds.keySet().collect())
                     .map { sample_id ->
                         def clair3_output_dir = file("${params.output_path}/routine_epi2me/${sample_id}/output_clair3")
                         def pileup_vcf = file("${params.output_path}/routine_epi2me/${sample_id}/output_clair3/pileup.vcf.gz")
@@ -2381,7 +2383,7 @@ workflow annotation {
                         tuple(sample_id, clair3_output_dir, pileup_vcf, merge_vcf)
                     }
 
-                def clairsto_annot_input = Channel.fromList(sample_thresholds.keySet().collect())
+                clairsto_annot_input_rmd = Channel.fromList(sample_thresholds.keySet().collect())
                     .map { sample_id ->
                         def clairsto_output_dir = file("${params.output_path}/routine_epi2me/${sample_id}/clairsto_output")
                         def snv_vcf = file("${params.output_path}/routine_epi2me/${sample_id}/clairsto_output/snv.vcf.gz")
@@ -2398,15 +2400,15 @@ workflow annotation {
                 // Step 2: Run annotation (ANNOVAR or VEP based on snv_annotator param)
                 if (params.snv_annotator == 'vep') {
                     println "Using VEP for SNV annotation"
-                    clair3_annotate_vep(clair3_annot_input)
-                    merge_clairsto_vcfs(clairsto_annot_input)
+                    clair3_annotate_vep(clair3_annot_input_rmd)
+                    merge_clairsto_vcfs(clairsto_annot_input_rmd)
                     clairs_to_annotate_vep(merge_clairsto_vcfs.out.merged_vcf)
                     clair3_out = clair3_annotate_vep.out.clair3output
                     clairs_to_out = clairs_to_annotate_vep.out.annotateandfilter_clairstoout
                 } else {
                     println "Using ANNOVAR for SNV annotation"
-                    clair3_annotate(clair3_annot_input)
-                    clairs_to_annotate(clairsto_annot_input)
+                    clair3_annotate(clair3_annot_input_rmd)
+                    clairs_to_annotate(clairsto_annot_input_rmd)
                     clair3_out = clair3_annotate.out.clair3output
                     clairs_to_out = clairs_to_annotate.out.annotateandfilter_clairstoout
                 }
@@ -2434,7 +2436,7 @@ workflow annotation {
 
             // Read cramino outputs from epi2me workflow
             println "Reading Cramino statistics from epi2me output..."
-            def cramino_output_ch = Channel.fromList(sample_thresholds.keySet().collect())
+            cramino_output_ch = Channel.fromList(sample_thresholds.keySet().collect())
                 .map { sample_id ->
                     def cramino_file = file("${params.output_path}/routine_epi2me/${sample_id}/cramino/${sample_id}_cramino_statistics.txt")
                     // Skip existence check in epiannotation and run_mode_order (files created by epi2me workflow)
