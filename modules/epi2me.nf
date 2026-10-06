@@ -358,11 +358,11 @@ workflow epi2me {
         }
 
         // Create file objects for reference files
-        def reference_genome = file(params.reference_genome)
-        def reference_genome_bai = file(params.reference_genome_bai)
-        def episv = file(params.episv)
-        def epimodkit = file(params.epimodkit)
-        def epicnv = file(params.epicnv)
+        reference_genome = file(params.reference_genome)
+        reference_genome_bai = file(params.reference_genome_bai)
+        episv = file(params.episv)
+        epimodkit = file(params.epimodkit)
+        epicnv = file(params.epicnv)
 
         // Validate reference files exist
         if (!reference_genome.exists()) {
@@ -379,9 +379,8 @@ workflow epi2me {
 
         // Create input channel based on run mode
         // Use merged_data input for both run_mode_order and run_mode_epiannotation
-        input_channel = Channel.empty()
-        if (params.run_mode_order || params.run_mode_epiannotation) {
-            input_channel = merged_data.map { sid, bam, bai, ref, ref_bai ->
+        input_channel = (params.run_mode_order || params.run_mode_epiannotation) ?
+            merged_data.map { sid, bam, bai, ref, ref_bai ->
                 tuple(
                     sid,
                     bam,
@@ -389,100 +388,43 @@ workflow epi2me {
                     ref,
                     ref_bai
                 )
+            } : Channel
+            .from(file(params.epi2me_sample_id_file).readLines())
+            .map { line ->
+                def fields = line.trim().split(/\s+/) as List
+                def sample_id = fields[0].trim()
+
+                def bam = file("${params.merge_bam_folder}/${sample_id}.merged.bam")
+                def bai = file("${params.merge_bam_folder}/${sample_id}.merged.bam.bai")
+
+                if (!bam.exists()) {
+                    bam = file("${params.merge_bam_folder}/${sample_id}.*.bam")
+                    bam = bam.find()
+                }
+                if (!bai.exists()) {
+                    bai = file("${params.merge_bam_folder}/${sample_id}.*.bam.bai")
+                    bai = bai.find()
+                }
+
+                if (!bam || !bai || !bam.exists() || !bai.exists()) {
+                    def existingRoiBam = file("${params.roi_bam_folder}/${sample_id}.roi.bam")
+                    def existingRoiBai = file("${params.roi_bam_folder}/${sample_id}.roi.bam.bai")
+                    def roiBamAlreadyExists = existingRoiBam.exists() && existingRoiBai.exists()
+                    if (!(params.run_mode == 'snv' && roiBamAlreadyExists)) {
+                        error "BAM file or index file not found for sample ID: ${sample_id}. Tried both exact match (${sample_id}.merged.bam) and wildcard pattern (${sample_id}.*.bam)"
+                    }
+                    bam = null
+                    bai = null
+                }
+
+                return tuple(
+                    sample_id,
+                    bam,
+                    bai,
+                    reference_genome,
+                    reference_genome_bai
+                )
             }
-        } else {
-            def sample_id_file = file(params.epi2me_sample_id_file)
-            def sample_ids_ch
-
-            if (sample_id_file.exists()) {
-                sample_ids_ch = Channel
-                    .from(sample_id_file.readLines())
-                    .map { line ->
-                        def fields = line.trim().split(/\s+/) as List
-                        fields[0].trim()
-                    }
-                    .filter { it }
-            } else {
-                if (!params.input_dir) {
-                    error "Sample ID file not found: ${params.epi2me_sample_id_file}. Provide --epi2me_sample_id_file or set --input_dir so sample IDs can be discovered from bam_pass files."
-                }
-
-                def discovered_bams = file("${params.input_dir}/*/**/bam_pass/*.bam")
-                def discovered_bam_list = discovered_bams instanceof List ? discovered_bams : [discovered_bams]
-                discovered_bam_list = discovered_bam_list.findAll { it && it.exists() && !it.name.endsWith('.bai') }
-
-                if (!discovered_bam_list) {
-                    error "Sample ID file not found (${params.epi2me_sample_id_file}) and no BAM files discovered under ${params.input_dir}/*/**/bam_pass/*.bam"
-                }
-
-                log.warn "Sample ID file not found. Auto-discovering sample IDs from ${params.input_dir}"
-
-                sample_ids_ch = Channel
-                    .from(discovered_bam_list)
-                    .map { bam -> bam.getParent().getParent().getParent().getBaseName() }
-                    .unique()
-            }
-
-            // Prefer already merged BAM files under merge_bam_folder
-            def merged_ready_ch = sample_ids_ch
-                .map { sample_id ->
-                    def bam = file("${params.merge_bam_folder}/${sample_id}.merged.bam")
-                    def bai = file("${params.merge_bam_folder}/${sample_id}.merged.bam.bai")
-
-                    if (!bam.exists()) {
-                        def bam_candidates = file("${params.merge_bam_folder}/${sample_id}.*.bam")
-                        def bam_list = bam_candidates instanceof List ? bam_candidates : [bam_candidates]
-                        def filtered_bams = bam_list.findAll { it && it.exists() && !it.name.endsWith('.bai') }
-                        if (filtered_bams) {
-                            bam = filtered_bams[0]
-                        }
-                    }
-
-                    if (!bai.exists() && bam && bam.exists()) {
-                        def inferred_bai = file("${bam}.bai")
-                        if (inferred_bai.exists()) {
-                            bai = inferred_bai
-                        }
-                    }
-
-                    (bam && bai && bam.exists() && bai.exists()) ? tuple(sample_id, bam, bai) : null
-                }
-                .filter { it != null }
-
-            // Fallback: build merged BAM from raw bam_pass files in --input_dir
-            def needs_prepare_ch = sample_ids_ch
-                .map { sample_id ->
-                    def bam = file("${params.merge_bam_folder}/${sample_id}.merged.bam")
-                    def bai = file("${params.merge_bam_folder}/${sample_id}.merged.bam.bai")
-
-                    if (bam.exists() && bai.exists()) {
-                        return null
-                    }
-
-                    if (!params.input_dir) {
-                        error "BAM file not found for sample ID: ${sample_id}. Provide merged BAMs in ${params.merge_bam_folder} or run with --input_dir to build from raw bam_pass files."
-                    }
-
-                    def raw_candidates = file("${params.input_dir}/${sample_id}/**/bam_pass/*.bam")
-                    def raw_list = raw_candidates instanceof List ? raw_candidates : [raw_candidates]
-                    raw_list = raw_list.findAll { it && it.exists() && !it.name.endsWith('.bai') }
-
-                    if (!raw_list) {
-                        error "BAM file not found for sample ID: ${sample_id}. Tried merged BAMs in ${params.merge_bam_folder} and raw BAMs in ${params.input_dir}/${sample_id}/**/bam_pass/*.bam"
-                    }
-
-                    tuple(sample_id, raw_list)
-                }
-                .filter { it != null }
-
-            def prepared_bam_ch = prepare_epi2me_input_bam(needs_prepare_ch).merged_input
-
-            input_channel = merged_ready_ch
-                .mix(prepared_bam_ch)
-                .map { sid, bam, bai ->
-                    tuple(sid, bam, bai, reference_genome, reference_genome_bai)
-                }
-        }
 
         // Run processes based on mode
         modkit_ch = Channel.empty()
@@ -520,7 +462,7 @@ workflow epi2me {
             ).roi_bam
         }
 
-        def roi_input_channel = roi_bam_ch
+        roi_input_channel = roi_bam_ch
             .map { sid, roi_bam, roi_bai ->
                 tuple(sid, roi_bam, roi_bai, file(params.reference_genome), file(params.reference_genome_bai))
             }
