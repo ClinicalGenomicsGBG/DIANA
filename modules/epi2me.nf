@@ -422,7 +422,7 @@ workflow epi2me {
         // the roiBamAlreadyExists check in input_channel above. 'all' mode always re-extracts,
         // since it also needs the real merged BAM directly for modkit/cnv/sv/stat regardless.
         if (params.run_mode == 'snv') {
-            def roi_branch = input_channel.branch { sid, bam, bai, ref, ref_bai ->
+            roi_branch = input_channel.branch { sid, bam, bai, ref, ref_bai ->
                 def existingRoiBam = file("${params.roi_bam_folder}/${sid}.roi.bam")
                 def existingRoiBai = file("${params.roi_bam_folder}/${sid}.roi.bam.bai")
                 reuse: existingRoiBam.exists() && existingRoiBai.exists()
@@ -431,8 +431,7 @@ workflow epi2me {
                     return tuple(sid, bam, bai, file(params.roi_bed))
             }
 
-            def extracted_roi_bam = extract_roi(roi_branch.extract).roi_bam
-            roi_bam_ch = roi_branch.reuse.mix(extracted_roi_bam)
+            roi_bam_ch = roi_branch.reuse.mix(extract_roi(roi_branch.extract).roi_bam)
         } else if (params.run_mode == 'all') {
             roi_bam_ch = extract_roi(
                 input_channel.map { sid, bam, bai, ref, ref_bai ->
@@ -467,22 +466,27 @@ workflow epi2me {
             } | run_epi2me_sv
         }
 
+        // Annotation channels — declared at workflow scope so they are visible
+        // inside all if-blocks without triggering the DSL2 static analyser's
+        // "already defined in process scope" error that occurs when Channel.value()
+        // is called with `def` inside an if-block more than twice.
+        refgene_ch = Channel.value(file(params.refgene))
+        hg38_refgenemrna_ch = Channel.value(file(params.hg38_refgenemrna))
+        clinvar_ch = Channel.value(file(params.clinvar))
+        clinvarindex_ch = Channel.value(file(params.clinvarindex))
+        hg38_cosmic100_ch = Channel.value(file(params.hg38_cosmic100))
+        hg38_cosmic100index_ch = Channel.value(file(params.hg38_cosmic100index))
+        roi_protein_coding_bed_ch = Channel.value(file(params.roi_protein_coding_bed))
+
         // SNV calling with Clair3 and ClairS-TO
         // Uses OCC/ROI BAM files and annotation databases
         if (params.run_mode in ['snv', 'all']) {
             println "Running SNV calling (Clair3 and ClairS-TO)..."
 
-            // Load annotation files as channels
-            def refgene_ch = Channel.value(file(params.refgene))
-            def hg38_refgenemrna_ch = Channel.value(file(params.hg38_refgenemrna))
-            def clinvar_ch = Channel.value(file(params.clinvar))
-            def clinvarindex_ch = Channel.value(file(params.clinvarindex))
-            def hg38_cosmic100_ch = Channel.value(file(params.hg38_cosmic100))
-            def hg38_cosmic100index_ch = Channel.value(file(params.hg38_cosmic100index))
-            def roi_protein_coding_bed_ch = Channel.value(file(params.roi_protein_coding_bed))
-
             // Prepare input for Clair3 (OCC BAM + annotation files)
-            def clair3_input = roi_input_channel
+            // No `def` — workflow-scope assignment avoids DSL2 static analyser errors
+            // when referencing workflow-scope channels (roi_input_channel) on the RHS.
+            clair3_input = roi_input_channel
                 .combine(refgene_ch)
                 .combine(hg38_refgenemrna_ch)
                 .combine(clinvar_ch)
@@ -491,7 +495,7 @@ workflow epi2me {
                 .combine(hg38_cosmic100index_ch)
 
             // Prepare input for ClairS-TO (OCC BAM + annotation files + OCC BED)
-            def clairsto_input = roi_input_channel
+            clairsto_input = roi_input_channel
                 .combine(refgene_ch)
                 .combine(hg38_refgenemrna_ch)
                 .combine(clinvar_ch)
@@ -500,32 +504,25 @@ workflow epi2me {
                 .combine(hg38_cosmic100index_ch)
                 .combine(roi_protein_coding_bed_ch)
 
-            // Run variant calling processes
-            def clair3_result = run_clair3(clair3_input)
-            clair3_ch = clair3_result.clair3_output_dir  // Use one of the outputs for dependency tracking
+            // Run variant calling processes — inline output access to avoid `def result =`
+            // pattern with workflow-scope channel inputs inside an if-block.
+            clair3_ch = run_clair3(clair3_input).clair3_output_dir
 
-            def clairsto_result = run_clairs_to(clairsto_input)
-            clairsto_ch = clairsto_result.clairsto_output_dir  // Use one of the outputs for dependency tracking
+            clairsto_result = run_clairs_to(clairsto_input)
+            clairsto_ch = clairsto_result.clairsto_output_dir
             clairsto_snv_vcf_ch = clairsto_result.snv_vcf
         }
 
         // BAF/VAF plot from ClairS-TO's somatic SNV calls — runs only for snv and all
         // modes, same as run_clair3/run_clairs_to above (needs clairsto's snv_vcf output)
         if (params.run_mode in ['snv', 'all']) {
-            def baf_result = baf_extract(clairsto_snv_vcf_ch)
-            baf_ch = baf_result.bafplotout
+            baf_ch = baf_extract(clairsto_snv_vcf_ch).bafplotout
         }
 
         // Cramino statistics (runs for 'stat' mode or 'all' mode)
         if (params.run_mode in ['stat', 'all']) {
             println "Running Cramino statistics..."
-
-            // Cramino uses merged BAM files
-            def cramino_input = input_channel
-                .view { "Cramino input: $it" }
-
-            def cramino_result = cramino_report(cramino_input)
-            cramino_ch = cramino_result.craminostatout  // Use the output for dependency tracking
+            cramino_ch = cramino_report(input_channel.view { "Cramino input: $it" }).craminostatout
         }
 
         // Create default channels for empty processes
@@ -585,7 +582,8 @@ workflow epi2me {
             // NOTE: must use .combine() not .cross() — .cross() consumes the barrier item once,
             // so only the first sample passes; all remaining samples are silently dropped.
             // .combine() creates a cartesian product: every sample pairs with the single barrier.
-            def snv_cramino_barrier = clair3_ch
+            // No `def` — workflow-scope to avoid DSL2 static analyser "already defined" errors.
+            snv_cramino_barrier = clair3_ch
                 .mix(clairsto_ch)
                 .mix(cramino_ch)
                 .mix(baf_ch)
